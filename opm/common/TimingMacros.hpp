@@ -19,6 +19,8 @@
 #ifndef OPM_TIMINGMACROS_HPP
 #define OPM_TIMINGMACROS_HPP
 
+#if 0
+
 // macros used to time blocks for example with tracy
 // time block of main part of codes which do not effect performance
 #ifndef OPM_TIMEBLOCK
@@ -30,6 +32,23 @@
 #ifndef OPM_TIMEBLOCK_LOCAL
 #define OPM_TIMEBLOCK_LOCAL(x)\
     do { /* nothing */ } while (false)
+#endif
+
+#else
+
+#include <tracy/Tracy.hpp>
+
+// macros used to time blocks for example with tracy
+// time block of main part of codes which do not effect performance
+#ifndef OPM_TIMEBLOCK
+#define OPM_TIMEBLOCK(x) ZoneScopedN(#x)
+#endif
+
+// detailed timing which may effect performance
+#ifndef OPM_TIMEBLOCK_LOCAL
+#define OPM_TIMEBLOCK_LOCAL(x)\
+    do { /* nothing */ } while (false)
+#endif
 #endif
 
 #endif // OPM_TIMINGMACROS_HPP

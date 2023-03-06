@@ -24,6 +24,8 @@
 #include <chrono>
 #include <sstream>
 
+#include <opm/common/TimingMacros.hpp>
+
 #include <opm/input/eclipse/Deck/Deck.hpp>
 
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
@@ -42,9 +44,12 @@
 #include <opm/common/OpmLog/StreamLog.hpp>
 #include <opm/common/OpmLog/LogUtil.hpp>
 
+#include <unistd.h>
 
 inline void createDot(const Opm::Schedule& schedule, const std::string& casename)
 {
+    OPM_TIMEBLOCK(createDot);
+    sleep(2);
     std::cout << "Writing " << casename << ".gv .... ";  std::cout.flush();
     std::ofstream os(casename + ".gv");
     os << "// This file was written by the 'wellgraph' utility from OPM.\n";
@@ -55,6 +60,8 @@ inline void createDot(const Opm::Schedule& schedule, const std::string& casename
     const std::size_t last = schedule.size() - 1;
     // Group -> Group relations.
     for (const auto& gn : groupnames) {
+        OPM_TIMEBLOCK(group);
+        sleep(1);
         const auto& g = schedule.getGroup(gn, last);
         const auto& children = g.groups();
         if (!children.empty()) {

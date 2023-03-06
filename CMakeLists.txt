@@ -1,6 +1,10 @@
 project(opm-common C CXX)
 cmake_minimum_required (VERSION 3.10)
 
+option (TRACY_ENABLE "" ON)
+option (TRACY_ON_DEMAND "" OFF)
+add_subdirectory (tracy)
+
 option(SIBLING_SEARCH "Search for other modules in sibling directories?" ON)
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
 set(OPM_MACROS_ROOT ${PROJECT_SOURCE_DIR})
@@ -266,6 +270,7 @@ if (OPM_ENABLE_PYTHON)
   endif()
 endif()
 
+LIST(APPEND opm-common_EXTRA_TARGETS TracyClient)
 
 # all setup common to the OPM library modules is done here
 include (OpmLibMain)
@@ -471,3 +476,5 @@ endif()
 
 install(DIRECTORY docs/man1 DESTINATION ${CMAKE_INSTALL_MANDIR}
   FILES_MATCHING PATTERN "*.1")
+
+target_link_libraries(opmcommon PUBLIC TracyClient)

@@ -80,7 +80,6 @@ public:
         if (config().enableHysteresis()) {
             if (config().krHysteresisModel() == 2 || config().krHysteresisModel() == 3 || config().krHysteresisModel() == 4 || config().pcHysteresisModel() == 0) {
                 C_ = 1.0/(Sncri_ - Sncrd_ + 1.0e-12) - 1.0/(Snmaxd_ - Sncrd_);
-                curvatureCapPrs_ =  config().curvatureCapPrs();
             }
             if (config().krHysteresisModel() == 4) {
                 Cw_ = 1.0/(Swcri_ - Swcrd_ + 1.0e-12) - 1.0/(Swmaxd_ - Swcrd_);
@@ -127,9 +126,7 @@ public:
     {
         drainageParams_ = value;
 
-        oilWaterSystem_ = (twoPhaseSystem == EclTwoPhaseSystemType::OilWater);
-        gasWaterSystem_ = (twoPhaseSystem == EclTwoPhaseSystemType::GasWater);
-        gasOilSystem_ = (twoPhaseSystem == EclTwoPhaseSystemType::GasOil);
+        twoPhaseSystem_ = twoPhaseSystem;
 
         if (!config().enableHysteresis())
             return;
@@ -175,15 +172,17 @@ public:
 
         // Additional Killough hysteresis model for pc
         if (config().pcHysteresisModel() == 0) {
+            Scalar pcmaxd{};
             if (twoPhaseSystem == EclTwoPhaseSystemType::GasOil) {
-                pcmaxd_ = info.maxPcgo;
+                pcmaxd = info.maxPcgo;
             } else if (twoPhaseSystem == EclTwoPhaseSystemType::GasWater) {
-                pcmaxd_ = info.maxPcgo + info.maxPcow;
+                pcmaxd = info.maxPcgo + info.maxPcow;
             }
             else {
                 assert(twoPhaseSystem == EclTwoPhaseSystemType::OilWater);
-                pcmaxd_ = -17.0; // At this point 'info.maxPcow' holds pre-swatinit value ...;
+                pcmaxd = -17.0; // At this point 'info.maxPcow' holds pre-swatinit value ...;
             }
+            pcmaxdDrain_ = pcmaxd;
         }
 
         // For WAG hysteresis, assume initial state along primary drainage curve.
@@ -243,18 +242,24 @@ public:
 
         // Killough hysteresis model for pc
         if (config().pcHysteresisModel() == 0) {
+            Scalar pcmaxi{};
             if (twoPhaseSystem == EclTwoPhaseSystemType::GasOil) {
                 Swmaxi_ = 1.0 - info.Sgl - info.Swl;
-                pcmaxi_ = info.maxPcgo;
+                pcmaxi = info.maxPcgo;
             } else if (twoPhaseSystem == EclTwoPhaseSystemType::GasWater) {
                 Swmaxi_ = info.Swu;
-                pcmaxi_ = info.maxPcgo + info.maxPcow;
+                pcmaxi = info.maxPcgo + info.maxPcow;
             }
             else {
                 assert(twoPhaseSystem == EclTwoPhaseSystemType::OilWater);
                 Swmaxi_ = info.Swu;
-                pcmaxi_ = info.maxPcow;
+                pcmaxi = info.maxPcow;
             }
+            // Precompute pcWght_ from pcmaxdDrain_ set in setDrainageParams
+            if (pcmaxdDrain_ < 0.0)
+                pcWght_ = EffLawT::twoPhaseSatPcnw(drainageParams(), 0.0)/(pcmaxi+1e-6);
+            else
+                pcWght_ = pcmaxdDrain_/(pcmaxi+1e-6);
         }
 
         if (config().krHysteresisModel() == 4) {
@@ -477,18 +482,13 @@ public:
     }
 
     Scalar pcWght() const // Aligning pci and pcd at Swir
-    {
-        if (pcmaxd_ < 0.0)
-            return EffLawT::twoPhaseSatPcnw(drainageParams(), 0.0)/(pcmaxi_+1e-6);
-        else
-            return pcmaxd_/(pcmaxi_+1e-6);
-    }
+    { return pcWght_; }
 
     Scalar curvatureCapPrs() const
-    { return curvatureCapPrs_;}
+    { return config().curvatureCapPrs(); }
 
     bool gasOilHysteresisWAG() const
-    { return (config().enableWagHysteresis() && gasOilSystem_ && wagConfig().wagGasFlag()) ; }
+    { return (config().enableWagHysteresis() && twoPhaseSystem_ == EclTwoPhaseSystemType::GasOil && wagConfig().wagGasFlag()) ; }
 
     Scalar reductionDrain() const
     { return std::pow(Swco_/(swatImbStart_+tolWAG_*wagConfig().wagWaterThresholdSaturation()), wagConfig().wagSecondaryDrainageReduction());}
@@ -529,8 +529,8 @@ public:
     Scalar krnSwImbStart() const
     { return krnSwImbStart_;}
 
-    Scalar tolWAG() const
-    { return tolWAG_;}
+    static constexpr Scalar tolWAG()
+    { return tolWAG_; }
 
     template <class Evaluation>
     Evaluation computeSwf(const Evaluation& Sw)  const
@@ -589,7 +589,7 @@ public:
         bool updateParams = false;
 
         if (config().pcHysteresisModel() == 0 && pcSw < pcSwMdc_) {
-            if (pcSwMdc_ == 2.0 && pcSw+1.0e-6 < Swcrd_ && (oilWaterSystem_ || gasWaterSystem_)) {
+            if (pcSwMdc_ == 2.0 && pcSw+1.0e-6 < Swcrd_ && (twoPhaseSystem_ == EclTwoPhaseSystemType::OilWater || twoPhaseSystem_ == EclTwoPhaseSystemType::GasWater)) {
                initialImb_ = true;
             }
             pcSwMdc_ = pcSw;
@@ -786,101 +786,68 @@ private:
 
     }
 
+    // ---- Cache line 0: config + hot-path branch decision data ----
     EclHysteresisConfig config_{};
-    std::shared_ptr<WagHysteresisConfig::WagHysteresisConfigRecord> wagConfig_{};
-    EffLawParams imbibitionParams_{};
-    EffLawParams drainageParams_{};
-
-    // largest wettinging phase saturation which is on the main-drainage curve. These are
-    // three different values because the sourounding code can choose to use different
-    // definitions for the saturations for different quantities
-    Scalar krwSwMdc_{-2.0};
     Scalar krnSwMdc_{2.0};
+    Scalar krwSwMdc_{-2.0};
     Scalar pcSwMdc_{2.0};
+    Scalar pcSwMic_{1.0};          // largest wetting phase saturation along main imbibition curve
+    bool initialImb_{false};       // Initial process is imbibition
+    EclTwoPhaseSystemType twoPhaseSystem_{EclTwoPhaseSystemType::GasOil};
 
-    // largest wettinging phase saturation along main imbibition curve
-    Scalar pcSwMic_{1.0};
-    // Initial process is imbibition (for initial saturations at or below critical drainage saturation)
-    bool initialImb_{false};
-
-    bool oilWaterSystem_{false};
-    bool gasOilSystem_{false};
-    bool gasWaterSystem_{false};
-
-
-    // offsets added to wetting phase saturation uf using the imbibition curves need to
-    // be used to calculate the wetting phase relperm, the non-wetting phase relperm and
-    // the capillary pressure
-    //Scalar deltaSwImbKrw_{};
-    Scalar deltaSwImbKrn_{};
-    //Scalar deltaSwImbPc_;
-
-    // the following uses the conventions of the Eclipse technical description:
-    //
-    // Sncrd_: critical non-wetting phase saturation for the drainage curve
-    // Sncri_: critical non-wetting phase saturation for the imbibition curve
-    // Swcri_: critical wetting phase saturation for the imbibition curve
-    // Swcrd_: critical wetting phase saturation for the drainage curve
-    // Swmaxi_; maximum wetting phase saturation for the imbibition curve
-    // Snmaxd_: non-wetting phase saturation where the non-wetting relperm reaches its
-    //          maximum on the drainage curve
-    // C_: factor required to calculate the trapped non-wetting phase saturation using
-    //     the Killough approach
-    // Cw_: factor required to calculate the trapped wetting phase saturation using
-    //     the Killough approach
-    // Swcod_: connate water saturation value used for wag hysteresis (2. drainage)
-    Scalar Sncrd_{};
+    // ---- Cache line 1: Killough non-wetting + Carlson parameters ----
+    Scalar Sncrt_{};               // trapped non-wetting phase saturation
     Scalar Sncri_{};
-    Scalar Swcri_{};
-    Scalar Swcrd_{};
-    Scalar Swmaxi_{};
+    Scalar Sncrd_{};
     Scalar Snmaxd_{};
+    Scalar KrndHy_{};              // Krn_drain(1-krnSwMdc_)
+    Scalar KrndMax_{};             // Krn_drain(Snmaxd_)
+    Scalar deltaSwImbKrn_{};
+    Scalar C_{};                   // Killough Lands constant
+
+    // ---- Cache line 2: Killough wetting phase (model 4) + Pc hysteresis ----
+    Scalar Swcrt_{};               // trapped wetting phase saturation
+    Scalar Swcrd_{};
+    Scalar Swcri_{};
+    Scalar Swmaxi_{};
     Scalar Swmaxd_{};
-    Scalar C_{};
-
-    Scalar KrndMax_{}; // Krn_drain(Snmaxd_)
-    Scalar KrwdMax_{}; // Krw_drain(Swmaxd_)
-    Scalar KrndHy_{};  // Krn_drain(1-krnSwMdc_)
-
-
-    // For wetting hysterese Killough
-    Scalar Cw_{};
+    Scalar Cw_{};                  // Killough wetting Lands constant
     Scalar KrwdHy_{};
+    Scalar pcWght_{};              // precomputed Pc weight (replaces pcmaxd_/pcmaxi_)
+
+    // ---- Cache lines 3-4: EffLawParams (passed by reference to effective law) ----
+    EffLawParams drainageParams_{};
+    EffLawParams imbibitionParams_{};
+
+    // ---- Less frequently accessed static parameters ----
+    Scalar KrwdMax_{};             // Krw_drain(Swmaxd_)
     Scalar Krwd_sncri_{};
     Scalar Krwi_snmax_{};
     Scalar Krwi_snrmax_{};
     Scalar Krwd_sncrt_{};
-    Scalar Swcrt_{}; // trapped wetting phase saturation
-
-    Scalar pcmaxd_{};  // max pc for drain
-    Scalar pcmaxi_{};  // max pc for imb
-
-    Scalar curvatureCapPrs_{}; // curvature parameter used for capillary pressure hysteresis
-
-    Scalar Sncrt_{}; // trapped non-wetting phase saturation
-
-    // Used for WAG hysteresis
     Scalar Swco_{};                // Connate water.
+    Scalar pcmaxdDrain_{};         // max pc for drain (used only during init to compute pcWght_)
+
+    // ---- WAG hysteresis state ----
+    std::shared_ptr<WagHysteresisConfig::WagHysteresisConfigRecord> wagConfig_{};
     Scalar swatImbStart_{};        // Water saturation at start of current drainage curve (end of previous imb curve).
     Scalar swatImbStartNxt_{};     // Water saturation at start of next drainage curve (end of current imb curve).
     Scalar krnSwWAG_{2.0};         // Saturation value after latest completed timestep.
     Scalar krnSwDrainRevert_{2.0}; // Saturation value at end of current drainage curve.
-    Scalar cTransf_{};             // Modified Lands constant used for free gas calculations to obtain consistent scanning curve
-                                   //  when reversion to imb occurs above historical maximum gas saturation (i.e. Sw > krwSwMdc_).
-    Scalar krnSwDrainStart_{-2.0}; // Saturation value at start of current drainage curve (end of previous imb curve).
-    Scalar krnSwDrainStartNxt_{};  // Saturation value at start of current drainage curve (end of previous imb curve).
-    Scalar krnImbStart_{};         // Relperm at start of current drainage curve (end of previous imb curve).
-    Scalar krnImbStartNxt_{};      // Relperm at start of next drainage curve (end of current imb curve).
+    Scalar cTransf_{};             // Modified Lands constant for free gas scanning curve.
+    Scalar krnSwDrainStart_{-2.0}; // Saturation value at start of current drainage curve.
+    Scalar krnSwDrainStartNxt_{};  // Saturation value at start of next drainage curve.
+    Scalar krnImbStart_{};         // Relperm at start of current drainage curve.
+    Scalar krnImbStartNxt_{};      // Relperm at start of next drainage curve.
     Scalar krnDrainStart_{};       // Primary (input) relperm evaluated at start of current drainage curve.
     Scalar krnDrainStartNxt_{};    // Primary (input) relperm evaluated at start of next drainage curve.
+    Scalar krnSwImbStart_{};       // Saturation value where primary drainage relperm equals krnImbStart_
+    Scalar SncrtWAG_{};
     bool isDrain_{true};           // Status is either drainage or imbibition
     bool wasDrain_{};              // Previous status.
-    Scalar krnSwImbStart_{};       // Saturation value where primary drainage relperm equals krnImbStart_
-
     int nState_{};                 // Number of cycles. Primary cycle is nState_=1.
 
-    Scalar SncrtWAG_{};
-    Scalar tolWAG_{0.001};
+    static constexpr Scalar tolWAG_{0.001};
 };
 
 } // namespace Opm
